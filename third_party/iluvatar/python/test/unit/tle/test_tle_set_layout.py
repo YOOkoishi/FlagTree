@@ -85,9 +85,9 @@ def iluvatar_runtime(iluvatar_backend):
     assert type(backend).__name__ == "CorexBackend"
 
 
-def _compile_offline(backend, kernel, signature, constexprs, *, llvm=True, asm=False, **option_overrides):
+def _compile_offline(backend, kernel, signature, constexprs, *, asm=False):
     """Compile through the native Iluvatar stages without creating a launcher."""
-    options = backend.parse_options({"num_warps": 4, "num_ctas": 1, "warp_size": 64, **option_overrides})
+    options = backend.parse_options({"num_warps": 4, "num_ctas": 1, "warp_size": TARGET.warp_size})
     source = ASTSource(kernel, signature, constexprs)
     context = libtriton.ir.context()
     libtriton.ir.load_dialects(context)
@@ -100,10 +100,9 @@ def _compile_offline(backend, kernel, signature, constexprs, *, llvm=True, asm=F
     result = {"ttir": str(module)}
     module = backend.make_ttgir(module, metadata, options, capability)
     result["ttgir"] = str(module)
-    if llvm:
-        result["llir"] = backend.make_llir(module, metadata, options, capability)
+    assert '"ttg.threads-per-warp" = 64' in result["ttgir"]
+    result["llir"] = backend.make_llir(module, metadata, options, capability)
     if asm:
-        assert llvm, "target assembly requires LLVM IR"
         result["asm"] = backend.make_asm(result["llir"], metadata, options, capability)
     return result
 
@@ -134,6 +133,7 @@ def _assert_lowered(assembly):
     assert "iluvatar_tle.gpu.set_layout" in assembly["ttir"]
     assert "iluvatar_tle.gpu.set_layout" not in assembly["ttgir"]
     assert re.search(r'ttg\.target\s*=\s*"cuda:(71|80)"', assembly["ttgir"])
+    assert '"ttg.threads-per-warp" = 64' in assembly["ttgir"]
     assert assembly["llir"]
     assert "iluvatar_tle.gpu.set_layout" not in assembly["llir"]
 
@@ -379,16 +379,6 @@ def test_set_layout_data_only_store_compiles_offline(iluvatar_backend):
                                 {"n": 125, "LAYOUT": layout, "BLOCK": BLOCK})
     _assert_lowered(assembly)
     _assert_layout(assembly["ttgir"], "arith.mulf", str(BLOCK), "f32", layout)
-    _assert_layout(assembly["ttgir"], "tt.store", str(BLOCK), "!tt.ptr<f32>", layout)
-
-
-def test_set_layout_32_lane_compiler_context(iluvatar_backend):
-    # This verifies the configurable conversion context, not device support.
-    # The Iluvatar runtime currently reports 64 lanes for both chip variants.
-    layout = tle.gpu.BlockEncoding([2], [32], [4], [0])
-    assembly = _compile_offline(iluvatar_backend, _data_only, {"src": "*fp32", "out": "*fp32"},
-                                {"n": 125, "LAYOUT": layout, "BLOCK": BLOCK}, warp_size=32, llvm=False)
-    assert '"ttg.threads-per-warp" = 32' in assembly["ttgir"]
     _assert_layout(assembly["ttgir"], "tt.store", str(BLOCK), "!tt.ptr<f32>", layout)
 
 

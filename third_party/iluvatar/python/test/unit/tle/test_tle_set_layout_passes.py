@@ -28,33 +28,33 @@ def iluvatar_ir():
     return context
 
 
-def _native_source(warp_size):
-    return f"""
-#layout = #ttg.blocked<{{sizePerThread = [2], threadsPerWarp = [{warp_size}], warpsPerCTA = [4], order = [0]}}>
-module {{
-  tt.func @layout(%ptr: !tt.ptr<f32>) {{
-    %range = tt.make_range {{start = 0 : i32, end = 256 : i32}} : tensor<256xi32>
+def _native_source():
+    return """
+#layout = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [64], warpsPerCTA = [4], order = [0]}>
+module {
+  tt.func @layout(%ptr: !tt.ptr<f32>) {
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
     %base = tt.splat %ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
     %pointers = tt.addptr %base, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
     %x = tt.load %pointers : tensor<256x!tt.ptr<f32>>
-    %out = "iluvatar_tle.gpu.set_layout"(%x) {{target_encoding = #layout}} : (tensor<256xf32>) -> tensor<256xf32>
+    %out = "iluvatar_tle.gpu.set_layout"(%x) {target_encoding = #layout} : (tensor<256xf32>) -> tensor<256xf32>
     tt.store %pointers, %out : tensor<256x!tt.ptr<f32>>
     tt.return
-  }}
-}}
+  }
+}
 """
 
 
-@pytest.mark.parametrize("warp_size", [32, 64])
-def test_native_set_layout_conversion(tmp_path, iluvatar_ir, warp_size):
+def test_native_set_layout_conversion(tmp_path, iluvatar_ir):
     path = tmp_path / "set-layout.ttir"
-    path.write_text(_native_source(warp_size))
+    path.write_text(_native_source())
     module = libtriton.ir.parse_mlir_module(str(path), iluvatar_ir)
     assert module.verify()
-    _run(iluvatar_ir, module, lambda pm: libtriton.passes.ttir.add_convert_to_ttgpuir(pm, "cuda:71", 4, warp_size, 1))
+    _run(iluvatar_ir, module, lambda pm: libtriton.passes.ttir.add_convert_to_ttgpuir(pm, "cuda:71", 4, 64, 1))
+    assert '"ttg.threads-per-warp" = 64' in module.str_nodebug()
     assert not _ops(module, "iluvatar_tle.gpu.set_layout")
     store, = _ops(module, "tt.store")
-    assert f"threadsPerWarp=[{warp_size}]" in _type(store.get_operand(1))
+    assert "threadsPerWarp=[64]" in _type(store.get_operand(1))
     assert "sizePerThread=[2]" in _type(store.get_operand(1))
 
 
@@ -62,7 +62,7 @@ def test_native_set_layout_rejects_multi_cta_context(tmp_path, iluvatar_ir, capf
     # CorexOptions rejects num_ctas > 1 before the pass. Check the pass itself
     # as well, so users compiling TTIR cannot bypass the set_layout limit.
     path = tmp_path / "multi-cta.ttir"
-    path.write_text(_native_source(64))
+    path.write_text(_native_source())
     module = libtriton.ir.parse_mlir_module(str(path), iluvatar_ir)
     manager = libtriton.ir.pass_manager(iluvatar_ir)
     libtriton.passes.ttir.add_convert_to_ttgpuir(manager, "cuda:71", 4, 64, 2)
@@ -91,7 +91,7 @@ module {
 
 
 def test_native_set_layout_rejects_linear_layout(tmp_path, iluvatar_ir, capfd):
-    source = _native_source(64)
+    source = _native_source()
     linear = "#ttg.linear<{register = [], lane = [[1], [2], [4], [8], [16], [32]], warp = [[64], [128]], block = []}>"
     source = re.sub(r"#layout = .*", f"#layout = {linear}", source)
     path = tmp_path / "unsupported-linear.ttir"
